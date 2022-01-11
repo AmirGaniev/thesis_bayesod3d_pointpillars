@@ -1,0 +1,4 @@
+MODEL:
+    POST_PROCESSING:
+        EVAL_LEVELS_LIST:
+            RANGE_LIST: [0,30,50,1000]
