@@ -10,7 +10,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
                  predict_boxes_when_training=True, **kwargs):
         super().__init__(
             model_cfg=model_cfg, num_class=num_class, class_names=class_names, grid_size=grid_size, point_cloud_range=point_cloud_range,
-            predict_boxes_when_training=True
+            predict_boxes_when_training=predict_boxes_when_training
         )
 
         self.num_anchors_per_location = sum(self.num_anchors_per_location)
