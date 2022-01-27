@@ -73,10 +73,12 @@ MODEL:
         NAME: AnchorHeadSingle
         CLASS_AGNOSTIC: False
 
-        USE_DIRECTION_CLASSIFIER: True
+        USE_DIRECTION_CLASSIFIER: False
         DIR_OFFSET: 0.78539
         DIR_LIMIT_OFFSET: 0.0
         NUM_DIR_BINS: 2
+        VAR_OUTPUT_REG: False
+        VAR_OUTPUT_CLS: False
 
         ANCHOR_GENERATOR_CONFIG: [
             {
@@ -120,6 +122,8 @@ MODEL:
             BOX_CODER: ResidualCoder
 
         LOSS_CONFIG:
+            REG_VAR_LOSS_TYPE: none #nll for negative_log_likelihood
+            NUM_SAMPLES_CLS_VAR_LOSS: 10
             LOSS_WEIGHTS: {
                 'cls_weight': 1.0,
                 'loc_weight': 2.0,

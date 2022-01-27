@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import torch.nn as nn
 
 from .anchor_head_template import AnchorHeadTemplate
@@ -9,7 +10,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
                  predict_boxes_when_training=True, **kwargs):
         super().__init__(
             model_cfg=model_cfg, num_class=num_class, class_names=class_names, grid_size=grid_size, point_cloud_range=point_cloud_range,
-            predict_boxes_when_training=predict_boxes_when_training
+            predict_boxes_when_training=True
         )
 
         self.num_anchors_per_location = sum(self.num_anchors_per_location)
@@ -22,6 +23,17 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             input_channels, self.num_anchors_per_location * self.box_coder.code_size,
             kernel_size=1
         )
+
+        if self.model_cfg.VAR_OUTPUT_REG:
+            self.conv_var = nn.Conv2d(
+                input_channels, self.num_anchors_per_location * self.box_coder.code_size,
+                kernel_size=1
+            )
+        if self.model_cfg.VAR_OUTPUT_CLS:
+            self.conv_cls_var = nn.Conv2d(
+                input_channels, self.num_anchors_per_location * self.num_class,
+                kernel_size=1
+            )
 
         if self.model_cfg.get('USE_DIRECTION_CLASSIFIER', None) is not None:
             self.conv_dir_cls = nn.Conv2d(
@@ -37,6 +49,13 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         pi = 0.01
         nn.init.constant_(self.conv_cls.bias, -np.log((1 - pi) / pi))
         nn.init.normal_(self.conv_box.weight, mean=0, std=0.001)
+        if self.model_cfg.VAR_OUTPUT_REG:
+            nn.init.constant_(self.conv_var.bias, 0)
+            nn.init.normal_(self.conv_var.weight, mean=0, std=0.0001)
+        if self.model_cfg.VAR_OUTPUT_CLS:
+            nn.init.normal_(self.conv_cls_var.weight, mean=0, std=0.01)
+            nn.init.constant_(self.conv_cls_var.bias, -10.0)
+
 
     def forward(self, data_dict):
         spatial_features_2d = data_dict['spatial_features_2d']
@@ -46,7 +65,20 @@ class AnchorHeadSingle(AnchorHeadTemplate):
 
         cls_preds = cls_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, C]
         box_preds = box_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, C]
+ 
 
+        if self.model_cfg.VAR_OUTPUT_REG:
+            box_var_preds = self.conv_var(spatial_features_2d)
+            box_var_preds = box_var_preds.permute(0, 2, 3, 1).contiguous()  
+            box_var_preds = torch.exp(box_var_preds) # [N, H, W, C]
+            self.forward_ret_dict['box_var_preds'] = box_var_preds
+
+        if self.model_cfg.VAR_OUTPUT_CLS:
+            cls_var_preds = self.conv_cls_var(spatial_features_2d)
+            cls_var_preds = cls_var_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, C]
+            self.forward_ret_dict['cls_var_preds'] = cls_var_preds
+
+            
         self.forward_ret_dict['cls_preds'] = cls_preds
         self.forward_ret_dict['box_preds'] = box_preds
 
