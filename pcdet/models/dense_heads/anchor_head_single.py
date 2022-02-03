@@ -25,10 +25,18 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         )
 
         if self.model_cfg.VAR_OUTPUT_REG:
+            #number of elements requires to describe an N*N covariance matrix is computes as (N*(N+1)) / 2
+            #in our case N = 7 (seven parameters to descrive the bounding box)
+            # we will only implement diagonal here (not full covariance)
             self.conv_var = nn.Conv2d(
-                input_channels, self.num_anchors_per_location * self.box_coder.code_size,
+                input_channels, self.num_anchors_per_location * 7,
                 kernel_size=1
             )
+            ## for full covariance approach (does not work in pytorch)
+            # self.conv_var = nn.Conv2d(
+            #     input_channels, self.num_anchors_per_location * 20,
+            #     kernel_size=1
+            # )
         if self.model_cfg.VAR_OUTPUT_CLS:
             self.conv_cls_var = nn.Conv2d(
                 input_channels, self.num_anchors_per_location * self.num_class,
@@ -69,8 +77,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
 
         if self.model_cfg.VAR_OUTPUT_REG:
             box_var_preds = self.conv_var(spatial_features_2d)
-            box_var_preds = box_var_preds.permute(0, 2, 3, 1).contiguous()  
-            box_var_preds = torch.exp(box_var_preds) # [N, H, W, C]
+            box_var_preds = box_var_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, C]
             self.forward_ret_dict['box_var_preds'] = box_var_preds
 
         if self.model_cfg.VAR_OUTPUT_CLS:

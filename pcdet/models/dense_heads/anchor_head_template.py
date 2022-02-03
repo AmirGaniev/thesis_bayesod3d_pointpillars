@@ -242,16 +242,34 @@ class AnchorHeadTemplate(nn.Module):
 
         if self.model_cfg.VAR_OUTPUT_REG == True:
             if self.model_cfg.LOSS_CONFIG.REG_VAR_LOSS_TYPE == "nll":
-                # our covariance is diagonal
-                covariance_matrix_diagonal = box_var_preds.view(batch_size, -1,
+                covariance_matrix_predictions = box_var_preds.view(batch_size, -1,
                                     box_var_preds.shape[-1] // self.num_anchors_per_location if not self.use_multihead else
                                     box_var_preds.shape[-1])
-                log_covariance = torch.log(covariance_matrix_diagonal)
-                log_covariance = torch.clamp(log_covariance, -7.0, 7.0)
 
-                #nnl equation
-                loc_loss_src = 0.5 * torch.exp(-log_covariance) * self.reg_loss_func(box_preds_sin, reg_targets_sin, weights=reg_weights)
-                loc_loss_src += 0.5 * log_covariance 
+                log_D = covariance_matrix_predictions
+
+                # # new matrix is used to make a covariance matrix from an array of variances network head returns
+                # new_matrix_temp = torch.zeros((covariance_matrix_predictions.shape[0], covariance_matrix_predictions.shape[1], self.box_coder.code_size, self.box_coder.code_size)).to(covariance_matrix_predictions.get_device())
+
+                # # we will convert an array consisting of variances (length of 28 for 7 parameters (N*(N+1)/2)) 
+                # # into the lower triangular covariance matrix
+                # for i in range(0, new_matrix_temp.shape[0]):
+                #     for k in range(0, new_matrix_temp.shape[1]):
+                #         temp_matrix = new_matrix_temp[i][k]
+                #         temp_array = covariance_matrix_predictions[i][k]
+                #         tril_indices = torch.tril_indices(row=7, col=7, offset=0)
+                #         temp_matrix[tril_indices[0], tril_indices[1]] = temp_array
+                #         new_matrix_temp[i][k] = temp_matrix
+
+                # log_covariance = new_matrix_temp
+                # #get cholensky decomposition
+                # log_D = torch.diagonal(log_covariance, dim1=2, dim2=3)
+                # print(log_D)
+
+                #multivariate nnl equation
+                loc_loss_src = 0.5 * torch.exp(-log_D) * self.reg_loss_func(box_preds_sin, reg_targets_sin, weights=reg_weights)
+                loc_loss_src += 0.5 * log_D 
+                #normalize by batch size and multply by loss weight
                 loc_loss = loc_loss_src.sum() / batch_size
                 loc_loss = loc_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['loc_weight']
                 box_loss = loc_loss

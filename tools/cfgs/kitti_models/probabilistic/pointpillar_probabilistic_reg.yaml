@@ -122,7 +122,7 @@ MODEL:
             BOX_CODER: ResidualCoder
 
         LOSS_CONFIG:
-            REG_VAR_LOSS_TYPE: none #nll for negative_log_likelihood
+            REG_VAR_LOSS_TYPE: nll #nll for negative_log_likelihood
             NUM_SAMPLES_CLS_VAR_LOSS: 10
             LOSS_WEIGHTS: {
                 'cls_weight': 1.0,
