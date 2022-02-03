@@ -248,6 +248,12 @@ class AnchorHeadTemplate(nn.Module):
 
                 log_D = covariance_matrix_predictions
 
+                # HERE I TRIED TO CREATE LOWER TRIANGULAR COVARIANCE MATRIX from a 28 (7*8/2) value
+                # variance array in pytorch. However, I could not find a way to do it using 
+                # pytorch (keras does have function implemented for this task)
+                # that is probably why Ali Harakeh did not use a full covariance matrix in his review
+                # of probabilistic object detectors  which utitlized pytorch (not keras)
+
                 # # new matrix is used to make a covariance matrix from an array of variances network head returns
                 # new_matrix_temp = torch.zeros((covariance_matrix_predictions.shape[0], covariance_matrix_predictions.shape[1], self.box_coder.code_size, self.box_coder.code_size)).to(covariance_matrix_predictions.get_device())
 
@@ -265,6 +271,8 @@ class AnchorHeadTemplate(nn.Module):
                 # #get cholensky decomposition
                 # log_D = torch.diagonal(log_covariance, dim1=2, dim2=3)
                 # print(log_D)
+
+                #since full covariance does not work, we will stick with diagonal variance
 
                 #multivariate nnl equation
                 loc_loss_src = 0.5 * torch.exp(-log_D) * self.reg_loss_func(box_preds_sin, reg_targets_sin, weights=reg_weights)

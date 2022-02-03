@@ -26,7 +26,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
 
         if self.model_cfg.VAR_OUTPUT_REG:
             #number of elements requires to describe an N*N covariance matrix is computes as (N*(N+1)) / 2
-            #in our case N = 7 (seven parameters to descrive the bounding box)
+            #in our case N = 7 (seven parameters to describe the bounding box)
             # we will only implement diagonal here (not full covariance)
             self.conv_var = nn.Conv2d(
                 input_channels, self.num_anchors_per_location * 7,
@@ -34,7 +34,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             )
             ## for full covariance approach (does not work in pytorch)
             # self.conv_var = nn.Conv2d(
-            #     input_channels, self.num_anchors_per_location * 20,
+            #     input_channels, self.num_anchors_per_location * 28,
             #     kernel_size=1
             # )
         if self.model_cfg.VAR_OUTPUT_CLS:
