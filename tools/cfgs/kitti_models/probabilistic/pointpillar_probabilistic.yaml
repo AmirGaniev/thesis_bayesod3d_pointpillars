@@ -79,6 +79,7 @@ MODEL:
         NUM_DIR_BINS: 2
         VAR_OUTPUT_REG: False
         VAR_OUTPUT_CLS: True
+        LOGVAR_MAX: 10
 
         ANCHOR_GENERATOR_CONFIG: [
             {
@@ -122,7 +123,7 @@ MODEL:
             BOX_CODER: ResidualCoder
 
         LOSS_CONFIG:
-            REG_VAR_LOSS_TYPE: none #nll for negative_log_likelihood
+            REG_VAR_LOSS_TYPE: NLL #nll for negative_log_likelihood or weightedsmoothl1loss
             NUM_SAMPLES_CLS_VAR_LOSS: 10
             LOSS_WEIGHTS: {
                 'cls_weight': 1.0,
