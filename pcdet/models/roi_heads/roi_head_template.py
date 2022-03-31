@@ -255,4 +255,6 @@ class RoIHeadTemplate(nn.Module):
         ).squeeze(dim=1)
         batch_box_preds[:, 0:3] += roi_xyz
         batch_box_preds = batch_box_preds.view(batch_size, -1, code_size)
+        print(batch_cls_preds.size())
+        print(batch_box_preds.size())
         return batch_cls_preds, batch_box_preds
