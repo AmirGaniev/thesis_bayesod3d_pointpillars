@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from . import box_utils
+from . import box_utils, probabilistic_utils, loss_utils
 
 
 class SigmoidFocalClassificationLoss(nn.Module):
@@ -259,3 +259,202 @@ def compute_fg_mask(gt_boxes2d, shape, downsample_factor=1, device=torch.device(
             fg_mask[b, v1:v2, u1:u2] = True
 
     return fg_mask
+
+
+class NegativeLogLikelihood(nn.Module):
+    def __init__(self,
+                 l1_loss: str = "WeightedSmoothL1Loss",
+                 code_weights: list = None,
+                 sin_diff: bool = False):
+        """
+        Args:
+            l1_loss: String.
+                Name of the L1 Loss
+            code_weights: (#codes) float list if not None.
+                Code-wise weights.
+            num_samples: Scalar int.
+                Number of samples (M) when computing energy score terms.
+            sin_diff: Bool.
+                Flag to perform the sin difference between angular parameters
+        """
+        super().__init__()
+        self.add_module(
+            'l1',
+            getattr(loss_utils, l1_loss)(code_weights=code_weights)
+        )
+        self.sin_diff = sin_diff
+
+    def forward(self,
+                mean: torch.Tensor,
+                var: torch.Tensor,
+                target: torch.Tensor,
+                weights: torch.Tensor = None):
+        """
+        Args:
+            mean: (..., #codes) float tensor.
+                Encoded predicted parameter means of objects.
+            var: (..., #codes) float tensor.
+                Encoded predicted paramater variances of objects.
+            target: (..., #codes) float tensor.
+                Regression targets.
+            weights: (...) float tensor if not None.
+        Returns:
+            loss: (..., #codes) float tensor.
+                NLL without reduction.
+        """
+        target = torch.where(torch.isnan(target), mean, target)  # ignore nan targets
+        log_var = torch.log(var)
+
+        if self.sin_diff:
+            mean_sin, target_sin = add_sin_difference(mean, target)
+            loss_l1 = self.l1(mean_sin, target_sin)
+        else:
+            loss_l1 = self.l1(mean, target)
+
+        loss = loss_l1 / var + 0.5 * log_var
+
+        return loss
+
+def add_sin_difference(boxes1, boxes2, dim=6):
+    assert dim != -1
+    # sin(a - b) = sinacosb-cosasinb
+    rad_pred_encoding = torch.sin(boxes1[..., dim:dim + 1]) * torch.cos(boxes2[..., dim:dim + 1])
+    rad_tg_encoding = torch.cos(boxes1[..., dim:dim + 1]) * torch.sin(boxes2[..., dim:dim + 1])
+    boxes1 = torch.cat([boxes1[..., :dim], rad_pred_encoding, boxes1[..., dim + 1:]], dim=-1)
+    boxes2 = torch.cat([boxes2[..., :dim], rad_tg_encoding, boxes2[..., dim + 1:]], dim=-1)
+    return boxes1, boxes2
+
+
+class EnergyScore(nn.Module):
+    def __init__(self,
+                 l1_loss: str = "WeightedSmoothL1Loss",
+                 code_weights: list = None,
+                 num_samples: int = 1000,
+                 sin_diff: bool = False):
+        """
+        Args:
+            l1_loss: String.
+                Name of the L1 Loss
+            code_weights: (#codes) float list if not None.
+                Code-wise weights.
+            num_samples: Scalar int.
+                Number of samples (M) when computing energy score terms.
+            sin_diff: Bool.
+                Flag to perform the sin difference between angular parameters
+        """
+        super().__init__()
+        self.add_module(
+            'l1',
+            getattr(loss_utils, l1_loss)(code_weights=code_weights)
+        )
+        self.num_samples = num_samples
+        self.sin_diff = sin_diff
+
+    def forward(self,
+                mean: torch.Tensor,
+                var: torch.Tensor,
+                target: torch.Tensor,
+                weights: torch.Tensor = None):
+        """
+        Args:
+            mean: (..., #codes) float tensor.
+                Encoded predicted parameter means of objects.
+            var: (..., #codes) float tensor.
+                Encoded predicted paramater variances of objects.
+            target: (..., #codes) float tensor.
+                Regression targets.
+            weights: (...) float tensor if not None.
+        Returns:
+            loss: (..., #codes) float tensor.
+                Energy score without reduction.
+        """
+        target = torch.where(torch.isnan(target), mean, target)  # ignore nan targets
+
+        if weights is not None:
+            # Select boxes that will be used in loss computation
+            loss = torch.zeros_like(target)
+            mask = weights != 0
+            mean = mean[mask]
+            var = var[mask]
+            target = target[mask]
+            weights = weights[mask].unsqueeze(dim=0)
+            weights = torch.repeat_interleave(weights, repeats=self.num_samples, dim=0)
+
+        samples = probabilistic_utils.sample_boxes(mean=mean,
+                                                   var=var,
+                                                   num_samples=self.num_samples+1)
+        samples_1 = samples[:self.num_samples]
+        samples_2 = samples[1:]
+
+        # Compute first term of energy score
+        target = target.unsqueeze(dim=0)
+        target = torch.repeat_interleave(target, repeats=self.num_samples, dim=0)
+        first_term_es = self.compute_first_term(samples_1=samples_1,
+                                                target=target,
+                                                weights=weights)
+
+        # Second term of energy score
+        second_term_es = self.compute_second_term(samples_1=samples_1,
+                                                  samples_2=samples_2,
+                                                  weights=weights)
+
+        # Compute the full energy score
+        es = (2 * first_term_es - second_term_es)
+        es = es.mean(dim=0)
+
+        if weights is not None:
+            loss[mask] = es  # Only assign losses for boxes used in loss computation
+        else:
+            loss = es
+
+        return loss
+
+    def compute_first_term(self, samples_1, target, weights):
+        """
+        Computes first term of Energy Score
+        Args:
+            samples_1: (M, ..., #codes) float tensor.
+                Object samples from predicted distribution.
+            target: (M, ..., #codes) float tensor.
+                Regression targets.
+            weights: (M, ...) float tensor if not None.
+        Returns:
+            first_term: (M, N, #codes) float tensor.
+                Energy score without reduction.
+        """
+        if self.sin_diff:
+            samples_1_sin, target_sin = add_sin_difference(samples_1, target)
+            first_term_es = self.l1(input=samples_1_sin,
+                                    target=target_sin,
+                                    weights=weights)
+        else:
+            first_term_es = self.l1(input=samples_1,
+                                    target=target,
+                                    weights=weights)
+
+        return first_term_es
+
+    def compute_second_term(self, samples_1, samples_2, weights):
+        """
+        Computes second term of Energy Score
+        Args:
+           samples_1: (M, ..., #codes) float tensor.
+               Object samples from predicted distribution.
+           samples_2: (M, ..., #codes) float tensor.
+               Object samples from predicted distribution
+               with index offset of 1.
+           weights: (M, ...) float tensor if not None.
+        Returns:
+           first_term: (M, N, #codes) float tensor.
+               Energy score without reduction.
+        """
+        if self.sin_diff:
+            samples_1_sin, samples_2_sin = add_sin_difference(samples_1, samples_2)
+            second_term_es = self.l1(input=samples_1_sin,
+                                     target=samples_2_sin,
+                                     weights=weights)
+        else:
+            second_term_es = self.l1(input=samples_1,
+                                     target=samples_2,
+                                     weights=weights)
+        return second_term_es
