@@ -75,12 +75,24 @@ class AnchorHeadTemplate(nn.Module):
             'cls_loss_func',
             loss_utils.SigmoidFocalClassificationLoss(alpha=0.25, gamma=2.0)
         )
-        reg_loss_name = 'WeightedSmoothL1Loss' if losses_cfg.get('REG_LOSS_TYPE', None) is None \
-            else losses_cfg.REG_LOSS_TYPE
-        self.add_module(
-            'reg_loss_func',
-            getattr(loss_utils, reg_loss_name)(code_weights=losses_cfg.LOSS_WEIGHTS['code_weights'])
-        )
+        if losses_cfg.get('REG_VAR_LOSS_TYPE') == "NLL":
+            reg_loss_name = 'NegativeLogLikelihood'
+            kwargs = losses_cfg.get('REG_LOSS_ARGS', {})
+            self.add_module(
+                'reg_loss_func',
+                getattr(loss_utils, reg_loss_name)(code_weights=losses_cfg.LOSS_WEIGHTS['code_weights'], **kwargs))
+        elif losses_cfg.get('REG_VAR_LOSS_TYPE') == "EnergyScore":
+            reg_loss_name = 'EnergyScore'
+            kwargs = losses_cfg.get('REG_LOSS_ARGS', {})
+            self.add_module(
+                'reg_loss_func',
+                getattr(loss_utils, reg_loss_name)(code_weights=losses_cfg.LOSS_WEIGHTS['code_weights'], **kwargs))
+        else:
+            reg_loss_name = 'WeightedSmoothL1Loss'
+            self.add_module(
+                'reg_loss_func',
+                getattr(loss_utils, reg_loss_name)(code_weights=losses_cfg.LOSS_WEIGHTS['code_weights'])
+            )
         self.add_module(
             'dir_loss_func',
             loss_utils.WeightedCrossEntropyLoss()
@@ -215,8 +227,7 @@ class AnchorHeadTemplate(nn.Module):
         box_reg_targets = self.forward_ret_dict['box_reg_targets']
         box_cls_labels = self.forward_ret_dict['box_cls_labels']
         ## variance 
-        if 'box_var_preds' in self.forward_ret_dict.keys():
-            box_var_preds = self.forward_ret_dict['box_var_preds'] # [N, H, W, C]
+        box_var_preds = self.forward_ret_dict.get('box_var_preds', None) # [N, H, W, C]
         batch_size = int(box_preds.shape[0])
         positives = box_cls_labels > 0
         reg_weights = positives.float()
@@ -237,15 +248,14 @@ class AnchorHeadTemplate(nn.Module):
                                    box_preds.shape[-1] // self.num_anchors_per_location if not self.use_multihead else
                                    box_preds.shape[-1])
 
-        # sin(a - b) = sinacosb-cosasinb
-        box_preds_sin, reg_targets_sin = self.add_sin_difference(box_preds, box_reg_targets)
-
-        if self.model_cfg.VAR_OUTPUT_REG == True:
-            if self.model_cfg.LOSS_CONFIG.REG_VAR_LOSS_TYPE == "nll":
+        if box_var_preds is not None:
+            # will be loglikelighood loss
+            if self.model_cfg.LOSS_CONFIG.FULL_COVARIANCE:
                 covariance_matrix_predictions = box_var_preds.view(batch_size, -1,
                                     box_var_preds.shape[-1] // self.num_anchors_per_location if not self.use_multihead else
                                     box_var_preds.shape[-1])
-
+                #FULL COVARIANCE DOES NOT WORK
+                print('FULL COVARIANCE DOES NOT WORK IN PYTHON')
                 log_D = covariance_matrix_predictions
 
                 # HERE I TRIED TO CREATE LOWER TRIANGULAR COVARIANCE MATRIX from a 28 (7*8/2) value
@@ -273,18 +283,39 @@ class AnchorHeadTemplate(nn.Module):
                 # print(log_D)
 
                 #since full covariance does not work, we will stick with diagonal variance
+            
 
                 #multivariate nnl equation
-                loc_loss_src = 0.5 * torch.exp(-log_D) * self.reg_loss_func(box_preds_sin, reg_targets_sin, weights=reg_weights)
-                loc_loss_src += 0.5 * log_D 
-                #normalize by batch size and multply by loss weight
+                # loc_loss_src = 0.5 * torch.exp(-log_D) * self.reg_loss_func(box_preds_sin, reg_targets_sin, weights=reg_weights)
+                # loc_loss_src += 0.5 * log_D 
+                # #normalize by batch size and multply by loss weight
+                # loc_loss = loc_loss_src.sum() / batch_size
+                # loc_loss = loc_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['loc_weight']
+                # box_loss = loc_loss
+                # tb_dict = {
+                #     'rpn_loss_loc': loc_loss.item()
+                # }
+
+            else:
+                covariance_matrix_predictions = box_var_preds.view(batch_size, -1,
+                                    box_var_preds.shape[-1] // self.num_anchors_per_location if not self.use_multihead else
+                                    box_var_preds.shape[-1])
+
+                loc_loss_src = self.reg_loss_func(mean=box_preds,
+                                                var=covariance_matrix_predictions,
+                                                target=box_reg_targets,
+                                                weights=reg_weights)  # [N, M]
                 loc_loss = loc_loss_src.sum() / batch_size
+                
                 loc_loss = loc_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['loc_weight']
                 box_loss = loc_loss
                 tb_dict = {
                     'rpn_loss_loc': loc_loss.item()
                 }
+                
         else:
+            # sin(a - b) = sinacosb-cosasinb
+            box_preds_sin, reg_targets_sin = self.add_sin_difference(box_preds, box_reg_targets)
             loc_loss_src = self.reg_loss_func(box_preds_sin, reg_targets_sin, weights=reg_weights)  # [N, M]
             loc_loss = loc_loss_src.sum() / batch_size
 
@@ -321,13 +352,14 @@ class AnchorHeadTemplate(nn.Module):
         tb_dict['rpn_loss'] = rpn_loss.item()
         return rpn_loss, tb_dict
 
-    def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None):
+    def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None, box_var_preds=None):
         """
         Args:
             batch_size:
             cls_preds: (N, H, W, C1)
             box_preds: (N, H, W, C2)
             dir_cls_preds: (N, H, W, C3)
+            box_var_preds: (N, H, W, C2)
 
         Returns:
             batch_cls_preds: (B, num_boxes, num_classes)
@@ -344,12 +376,42 @@ class AnchorHeadTemplate(nn.Module):
             anchors = self.anchors
         num_anchors = anchors.view(-1, anchors.shape[-1]).shape[0]
         batch_anchors = anchors.view(1, -1, anchors.shape[-1]).repeat(batch_size, 1, 1)
-        batch_cls_preds = cls_preds.view(batch_size, num_anchors, -1).float() \
-            if not isinstance(cls_preds, list) else cls_preds
-        batch_box_preds = box_preds.view(batch_size, num_anchors, -1) if not isinstance(box_preds, list) \
-            else torch.cat(box_preds, dim=1).view(batch_size, num_anchors, -1)
-        batch_box_preds = self.box_coder.decode_torch(batch_box_preds, batch_anchors)
 
+
+        if box_var_preds == None:
+            # no box variance
+            batch_cls_preds = cls_preds.view(batch_size, num_anchors, -1).float() \
+                if not isinstance(cls_preds, list) else cls_preds
+            batch_box_preds = box_preds.view(batch_size, num_anchors, -1) if not isinstance(box_preds, list) \
+                else torch.cat(box_preds, dim=1).view(batch_size, num_anchors, -1)
+            batch_box_preds = self.box_coder.decode_torch(batch_box_preds, batch_anchors)
+            batch_box_var_pred = None
+
+        else:
+            # yes to box variance
+            batch_cls_preds = cls_preds.view(batch_size, num_anchors, -1).float() \
+                if not isinstance(cls_preds, list) else cls_preds
+            batch_box_preds = box_preds.view(batch_size, num_anchors, -1) if not isinstance(box_preds, list) \
+                else torch.cat(box_preds, dim=1).view(batch_size, num_anchors, -1)
+            # here we incoporate variance into results
+            batch_box_var_preds = box_var_preds.view(batch_size, num_anchors, -1) if not isinstance(box_var_preds, list) \
+                else torch.cat(box_var_preds, dim=1).view(batch_size, num_anchors, -1)
+            diag_batch_box_var_preds = torch.diag_embed(batch_box_var_preds + 1e-4)
+            cholesky = torch.sqrt(diag_batch_box_var_preds)
+            mutivariate_normal_distribution = torch.distributions.multivariate_normal.MultivariateNormal(
+                batch_box_preds,
+                scale_tril=cholesky
+            )
+            num_samples = self.model_cfg.LOSS_CONFIG.LOSS_ARGS.num_samples
+            batch_box_preds = mutivariate_normal_distribution.rsample((num_samples, ))
+            # now we decode with variance incoroparated
+            batch_box_preds = self.box_coder.decode_torch(batch_box_preds,
+                batch_anchors).view(num_samples, -1, self.box_coder.code_size)
+
+            batch_box_preds, batch_box_var_pred = compute_mean_covariance_torch(batch_box_preds)
+            batch_box_var_pred = batch_box_var_pred.view(batch_size, -1, self.box_coder.code_size, self.box_coder.code_size)
+
+        # ---------------------
         if dir_cls_preds is not None:
             dir_offset = self.model_cfg.DIR_OFFSET
             dir_limit_offset = self.model_cfg.DIR_LIMIT_OFFSET
@@ -367,8 +429,43 @@ class AnchorHeadTemplate(nn.Module):
             batch_box_preds[..., 6] = common_utils.limit_period(
                 -(batch_box_preds[..., 6] + np.pi / 2), offset=0.5, period=np.pi * 2
             )
+        # -----------------
 
-        return batch_cls_preds, batch_box_preds
+        return batch_cls_preds, batch_box_preds, batch_box_var_pred
 
     def forward(self, **kwargs):
         raise NotImplementedError
+
+
+# borrowed from Ali's original work on comparing probabilistic object detectors
+def compute_mean_covariance_torch(input_samples):
+    """
+    Function for efficient computation of mean and covariance matrix in pytorch.
+    Args:
+        input_samples(list): list of tensors from M stochastic monte-carlo sampling runs, each containing
+        N x k tensors.
+    Returns:
+        predicted_mean(Tensor): an Nxk tensor containing the predicted mean.
+        predicted_covariance(Tensor): an Nxkxk tensor containing the predicted covariance matrix.
+    """
+    if isinstance(input_samples, torch.Tensor):
+        num_samples = input_samples.shape[0]
+    else:
+        num_samples = len(input_samples)
+        input_samples = torch.stack(input_samples, 2)
+
+    # Compute Mean
+    predicted_mean = torch.mean(input_samples, 0, keepdim=True)
+
+    # Compute Covariance
+    residuals = torch.transpose(
+        torch.unsqueeze(
+            input_samples -
+            predicted_mean,
+            2),
+        2,
+        3)
+    predicted_covariance = torch.matmul(residuals, torch.transpose(residuals, 3, 2))
+    predicted_covariance = torch.sum(predicted_covariance, 0) / (num_samples - 1)
+
+    return predicted_mean.squeeze(0), predicted_covariance

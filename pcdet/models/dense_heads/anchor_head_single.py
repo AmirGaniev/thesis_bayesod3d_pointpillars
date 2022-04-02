@@ -19,6 +19,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             input_channels, self.num_anchors_per_location * self.num_class,
             kernel_size=1
         )
+        
         self.conv_box = nn.Conv2d(
             input_channels, self.num_anchors_per_location * self.box_coder.code_size,
             kernel_size=1
@@ -33,13 +34,15 @@ class AnchorHeadSingle(AnchorHeadTemplate):
                 kernel_size=1
             )
 
+            if self.model_cfg.LOSS_CONFIG.FULL_COVARIANCE:
+                self.conv_var = nn.Conv2d(
+                    input_channels, self.num_anchors_per_location * (self.box_coder.code_size*(self.box_coder.code_size+1))/2,
+                    kernel_size=1,
+                )
+
             self.logvar_max = self.model_cfg.get("LOGVAR_MAX", None)
 
-            ## for full covariance approach (does not work in pytorch)
-            # self.conv_var = nn.Conv2d(
-            #     input_channels, self.num_anchors_per_location * 28,
-            #     kernel_size=1
-            # )
+
         if self.model_cfg.VAR_OUTPUT_CLS:
             self.conv_cls_var = nn.Conv2d(
                 input_channels, self.num_anchors_per_location * self.num_class,
@@ -111,12 +114,15 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             self.forward_ret_dict.update(targets_dict)
 
         if not self.training or self.predict_boxes_when_training:
-            batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
+            batch_cls_preds, batch_box_preds, batch_box_var_preds = self.generate_predicted_boxes(
                 batch_size=data_dict['batch_size'],
-                cls_preds=cls_preds, box_preds=box_preds, dir_cls_preds=dir_cls_preds
+                cls_preds=cls_preds, box_preds=box_preds, dir_cls_preds=dir_cls_preds,
+                box_var_preds=box_var_preds
             )
             data_dict['batch_cls_preds'] = batch_cls_preds
             data_dict['batch_box_preds'] = batch_box_preds
+            if batch_box_var_preds is not None:
+                data_dict['batch_box_var_preds'] = batch_box_var_preds
             data_dict['cls_preds_normalized'] = False
 
         return data_dict
