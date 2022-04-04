@@ -199,6 +199,8 @@ class Detector3DTemplate(nn.Module):
                 assert batch_dict['batch_box_preds'].shape.__len__() == 2
                 batch_mask = (batch_dict['batch_index'] == index)
             else:
+                # that's where we are
+                # there where pointpillars output is
                 assert batch_dict['batch_box_preds'].shape.__len__() == 3
                 batch_mask = index
 
@@ -206,13 +208,53 @@ class Detector3DTemplate(nn.Module):
             src_box_preds = box_preds
 
             if not isinstance(batch_dict['batch_cls_preds'], list):
+                # PointPillars will enter this if statement to work with classification
+                # that the if statement where point 
                 cls_preds = batch_dict['batch_cls_preds'][batch_mask]
 
                 src_cls_preds = cls_preds
                 assert cls_preds.shape[1] in [1, self.num_class]
 
-                if not batch_dict['cls_preds_normalized']:
-                    cls_preds = torch.sigmoid(cls_preds)
+                # incroporate variances into the classification predictions
+                # monte carlo sampling
+
+                if self.model_cfg.DENSE_HEAD.VAR_OUTPUT_CLS is True:
+                    cls_var_preds = batch_dict['batch_cls_var_preds'][batch_mask]
+                    cls_distribution = torch.distributions.normal.Normal(
+                        cls_preds, scale=torch.sqrt(torch.exp(cls_var_preds))
+                    )
+                    # sample
+                    cls_sample = cls_distribution.rsample((
+                        self.model_cfg.DENSE_HEAD.LOSS_CONFIG.NUM_SAMPLES_CLS_VAR_LOSS, ))
+
+                    if not batch_dict['cls_preds_normalized']:
+                        # final values
+                        # cls_preds = torch.mean(torch.sigmoid(cls_sample), 0)
+
+                        # softmax implementation generate posterior likelihood
+                        cls_preds = torch.mean(torch.nn.functional.softmax(cls_sample, dim=2), 0)
+
+                        if self.model_cfg.DENSE_HEAD.BAYESOD_CONFIG.use_dirichlet_prior: 
+                            categorical_likelihood_distribution = torch.distributions.categorical.Categorical(
+                                probs=cls_preds
+                            )
+
+                            categorical_samples = torch.nn.functional.one_hot(
+                            categorical_likelihood_distribution.sample((100, )),
+                            num_classes=cls_preds.shape[1]
+                            )
+
+                            categorical_likelihood_samples = torch.sum(categorical_samples, dim=0)
+
+                            if self.model_cfg.DENSE_HEAD.BAYESOD_CONFIG.dirichlet_prior == "non_informative":
+                                dirich_prior_alphas = float(1.0 /  cls_preds.shape[1])
+                                dirichlet_posterior_count =   categorical_likelihood_samples + dirich_prior_alphas
+                            else:
+                                dirichlet_posterior_count = categorical_likelihood_samples
+                            cls_preds = dirichlet_posterior_count / torch.sum(dirichlet_posterior_count, dim=1, keepdim=True)
+                else:
+                    if not batch_dict['cls_preds_normalized']:
+                        cls_preds = torch.sigmoid(cls_preds)
             else:
                 cls_preds = [x[batch_mask] for x in batch_dict['batch_cls_preds']]
                 src_cls_preds = cls_preds
@@ -277,6 +319,7 @@ class Detector3DTemplate(nn.Module):
                 'pred_scores': final_scores,
                 'pred_labels': final_labels
             }
+            # print(record_dict)
             pred_dicts.append(record_dict)
 
         return pred_dicts, recall_dict

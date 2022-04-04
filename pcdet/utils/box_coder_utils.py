@@ -42,7 +42,7 @@ class ResidualCoder(object):
         cts = [g - a for g, a in zip(cgs, cas)]
         return torch.cat([xt, yt, zt, dxt, dyt, dzt, *rts, *cts], dim=-1)
 
-    def decode_torch(self, box_encodings, anchors):
+    def decode_torch(self, box_encodings, anchors, box_encodings_var=None):
         """
         Args:
             box_encodings: (B, N, 7 + C) or (N, 7 + C) [x, y, z, dx, dy, dz, heading or *[cos, sin], ...]
@@ -57,6 +57,9 @@ class ResidualCoder(object):
         else:
             xt, yt, zt, dxt, dyt, dzt, cost, sint, *cts = torch.split(box_encodings, 1, dim=-1)
 
+        if box_encodings_var is not None: #only for pointpillars
+            vxt, vyt, vzt, vdxt, vdyt, vdzt, vrt, *vcts = torch.split(box_encodings_var, 1, dim=-1)
+
         diagonal = torch.sqrt(dxa ** 2 + dya ** 2)
         xg = xt * diagonal + xa
         yg = yt * diagonal + ya
@@ -66,15 +69,35 @@ class ResidualCoder(object):
         dyg = torch.exp(dyt) * dya
         dzg = torch.exp(dzt) * dza
 
+        if box_encodings_var is not None:
+            # use error propagation formula to propagate error through equations above
+            vxg = vxt * diagonal**2
+            vyg = vyt * diagonal**2
+            vzg = vzt * dza**2
+            vdxg =  vdxt * dxg**2
+            vdyg = vdyt * dyg**2
+            vdzg = vdzt * dzg**2
+
+
         if self.encode_angle_by_sincos:
             rg_cos = cost + torch.cos(ra)
             rg_sin = sint + torch.sin(ra)
             rg = torch.atan2(rg_sin, rg_cos)
+            if box_encodings_var is not None:
+                # THIS IS NOT RIGHT BUT POINTPILLARS DOES NOT ENGOCE ANGLE BY SIN OR COS
+                vrg = vrt
         else:
             rg = rt + ra
+            if box_encodings_var is not None:
+                vrg = vrt
+    
+        if box_encodings_var is not None:
+            return_decoded_variance = torch.cat([vxg, vyg, vzg, vdxg, vdyg, vdzg, vrg], dim=-1)
+        else:
+            return_decoded_variance = None
 
         cgs = [t + a for t, a in zip(cts, cas)]
-        return torch.cat([xg, yg, zg, dxg, dyg, dzg, rg, *cgs], dim=-1)
+        return torch.cat([xg, yg, zg, dxg, dyg, dzg, rg, *cgs], dim=-1), return_decoded_variance
 
 
 class PreviousResidualDecoder(object):

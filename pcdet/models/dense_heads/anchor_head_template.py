@@ -352,7 +352,7 @@ class AnchorHeadTemplate(nn.Module):
         tb_dict['rpn_loss'] = rpn_loss.item()
         return rpn_loss, tb_dict
 
-    def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None, box_var_preds=None):
+    def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None, box_var_preds=None, cls_var_preds=None):
         """
         Args:
             batch_size:
@@ -384,8 +384,7 @@ class AnchorHeadTemplate(nn.Module):
                 if not isinstance(cls_preds, list) else cls_preds
             batch_box_preds = box_preds.view(batch_size, num_anchors, -1) if not isinstance(box_preds, list) \
                 else torch.cat(box_preds, dim=1).view(batch_size, num_anchors, -1)
-            batch_box_preds = self.box_coder.decode_torch(batch_box_preds, batch_anchors)
-            batch_box_var_pred = None
+            batch_box_preds, batch_box_var_preds = self.box_coder.decode_torch(batch_box_preds, batch_anchors)
 
         else:
             # yes to box variance
@@ -393,24 +392,44 @@ class AnchorHeadTemplate(nn.Module):
                 if not isinstance(cls_preds, list) else cls_preds
             batch_box_preds = box_preds.view(batch_size, num_anchors, -1) if not isinstance(box_preds, list) \
                 else torch.cat(box_preds, dim=1).view(batch_size, num_anchors, -1)
+            
+
+            # Attempt below to decode the box values and their variance by creating a distribution of means does not work
+            # if we make a distribution, the tensopr becomes too large for gpu to handle (memory issues)
+            # Thus we need to make a box decoder that will accept the variances and decode them as well instead of passing many distribution values to the decode
+            # ------------------------------------
             # here we incoporate variance into results
+            # batch_box_var_preds = box_var_preds.view(batch_size, num_anchors, -1) if not isinstance(box_var_preds, list) \
+            #     else torch.cat(box_var_preds, dim=1).view(batch_size, num_anchors, -1)
+            # diag_batch_box_var_preds = torch.diag_embed(batch_box_var_preds + 1e-4)
+            # cholesky = torch.sqrt(diag_batch_box_var_preds)
+            # mutivariate_normal_distribution = torch.distributions.multivariate_normal.MultivariateNormal(
+            #     batch_box_preds,
+            #     scale_tril=cholesky
+            # )
+            # num_samples = self.model_cfg.LOSS_CONFIG.LOSS_ARGS.num_samples
+            # batch_box_preds = mutivariate_normal_distribution.rsample((num_samples, ))
+            # # now we decode with variance incoroparated
+            # batch_box_preds = self.box_coder.decode_torch(batch_box_preds,
+            #     batch_anchors).view(num_samples, -1, self.box_coder.code_size)
+
+            # batch_box_preds, batch_box_var_pred = compute_mean_covariance_torch(batch_box_preds)
+            # batch_box_preds = batch_box_preds.view(batch_size, -1, self.box_coder.code_size)
+            # batch_box_var_pred = batch_box_var_pred.view(batch_size, -1, self.box_coder.code_size, self.box_coder.code_size)
+            # ------------------------------------
             batch_box_var_preds = box_var_preds.view(batch_size, num_anchors, -1) if not isinstance(box_var_preds, list) \
                 else torch.cat(box_var_preds, dim=1).view(batch_size, num_anchors, -1)
-            diag_batch_box_var_preds = torch.diag_embed(batch_box_var_preds + 1e-4)
-            cholesky = torch.sqrt(diag_batch_box_var_preds)
-            mutivariate_normal_distribution = torch.distributions.multivariate_normal.MultivariateNormal(
-                batch_box_preds,
-                scale_tril=cholesky
-            )
-            num_samples = self.model_cfg.LOSS_CONFIG.LOSS_ARGS.num_samples
-            batch_box_preds = mutivariate_normal_distribution.rsample((num_samples, ))
-            # now we decode with variance incoroparated
-            batch_box_preds = self.box_coder.decode_torch(batch_box_preds,
-                batch_anchors).view(num_samples, -1, self.box_coder.code_size)
+            # batch_box_var_preds = torch.log(batch_box_var_preds) #maybe, not sure
+            
+            batch_box_preds, batch_box_var_preds = self.box_coder.decode_torch(batch_box_preds, batch_anchors, batch_box_var_preds)
+            batch_box_var_preds = torch.diag_embed(batch_box_var_preds)
 
-            batch_box_preds, batch_box_var_pred = compute_mean_covariance_torch(batch_box_preds)
-            batch_box_var_pred = batch_box_var_pred.view(batch_size, -1, self.box_coder.code_size, self.box_coder.code_size)
-
+        if cls_var_preds == None:
+            batch_cls_var_preds = None
+        else: 
+            batch_cls_var_preds = cls_var_preds.view(batch_size, num_anchors, -1).float() \
+                if not isinstance(cls_var_preds, list) else cls_var_preds
+            
         # ---------------------
         if dir_cls_preds is not None:
             dir_offset = self.model_cfg.DIR_OFFSET
@@ -431,7 +450,52 @@ class AnchorHeadTemplate(nn.Module):
             )
         # -----------------
 
-        return batch_cls_preds, batch_box_preds, batch_box_var_pred
+        # let's incoporate gaussian prior
+        if box_var_preds != None and self.model_cfg.BAYESOD_CONFIG.use_gaussian_prior:
+            if  self.model_cfg.BAYESOD_CONFIG.gaussian_prior.type == 'isotropic':
+                gaussian_likelihood_precisions = torch.inverse(batch_box_var_preds)
+
+                # ----------------------- initialize prior variables    
+                # let's create a gaussian prior
+                gaussian_prior_variance = torch.tensor([
+                    self.model_cfg.BAYESOD_CONFIG.gaussian_prior.isotropic_variance]).to(box_var_preds.device)
+                gaussian_prior_variance = gaussian_prior_variance.repeat(gaussian_likelihood_precisions.shape[2])
+                gaussian_prior_variance = torch.diag_embed(gaussian_prior_variance)
+                gaussian_prior_variance = gaussian_prior_variance.unsqueeze(0)
+                gaussian_prior_variance = gaussian_prior_variance.repeat(gaussian_likelihood_precisions.shape[1], 1, 1)
+                gaussian_prior_variance = gaussian_prior_variance.unsqueeze(0)
+                gaussian_prior_variance = gaussian_prior_variance.repeat(gaussian_likelihood_precisions.shape[0], 1, 1, 1)
+                # put in the dimensions we need for calculations B * enchors * C * 1 
+                gaussian_prior_means = batch_box_preds[0].unsqueeze(0).unsqueeze(-1)
+                #------------------------
+
+                # Here gaussian posterior calculations from the paper begin
+                # below dimensions B * enchors * C * C
+                gaussian_prior_precision = torch.inverse(gaussian_prior_variance)
+
+                gaussian_posterior_precisions = gaussian_likelihood_precisions + gaussian_prior_precision
+                gaussian_posterior_covs = torch.inverse(gaussian_posterior_precisions)
+
+                # calculate posterior means
+                gaussian_likelihood_mean_weights = torch.matmul(gaussian_likelihood_precisions,
+                                                                batch_box_preds.unsqueeze(-1))
+                
+                prior_mean_weights = torch.matmul(gaussian_prior_precision,
+                                                gaussian_prior_means)
+                
+                intermediate_value = prior_mean_weights + gaussian_likelihood_mean_weights
+
+                # calculate and put in dimestions batch_size, anchors, 
+
+                gaussian_posterior_means = torch.matmul(gaussian_posterior_covs,
+                                                        intermediate_value).squeeze(-1)
+                print(gaussian_posterior_means.shape)
+
+                # done with posterior calculations
+                batch_box_preds = gaussian_posterior_means
+                batch_box_var_preds = gaussian_posterior_covs
+
+        return batch_cls_preds, batch_box_preds, batch_box_var_preds, batch_cls_var_preds
 
     def forward(self, **kwargs):
         raise NotImplementedError

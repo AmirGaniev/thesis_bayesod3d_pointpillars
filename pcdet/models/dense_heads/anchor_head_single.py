@@ -10,7 +10,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
                  predict_boxes_when_training=True, **kwargs):
         super().__init__(
             model_cfg=model_cfg, num_class=num_class, class_names=class_names, grid_size=grid_size, point_cloud_range=point_cloud_range,
-            predict_boxes_when_training=predict_boxes_when_training
+            predict_boxes_when_training=True
         )
 
         self.num_anchors_per_location = sum(self.num_anchors_per_location)
@@ -64,7 +64,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         nn.init.constant_(self.conv_cls.bias, -np.log((1 - pi) / pi))
         nn.init.normal_(self.conv_box.weight, mean=0, std=0.001)
         if self.model_cfg.VAR_OUTPUT_REG:
-            nn.init.normal_(self.conv_var.weight, mean=0, std=0.001)
+            nn.init.normal_(self.conv_var.weight, mean=0, std=0.0001)
         if self.model_cfg.VAR_OUTPUT_CLS:
             nn.init.normal_(self.conv_cls_var.weight, mean=0, std=0.01)
             nn.init.constant_(self.conv_cls_var.bias, -10.0)
@@ -95,6 +95,9 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             cls_var_preds = self.conv_cls_var(spatial_features_2d)
             cls_var_preds = cls_var_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, C]
             self.forward_ret_dict['cls_var_preds'] = cls_var_preds
+        else:
+            cls_var_preds = None
+                
     
 
         if self.conv_dir_cls is not None:
@@ -114,15 +117,19 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             self.forward_ret_dict.update(targets_dict)
 
         if not self.training or self.predict_boxes_when_training:
-            batch_cls_preds, batch_box_preds, batch_box_var_preds = self.generate_predicted_boxes(
+            batch_cls_preds, batch_box_preds, batch_box_var_preds, batch_cls_var_preds = self.generate_predicted_boxes(
                 batch_size=data_dict['batch_size'],
                 cls_preds=cls_preds, box_preds=box_preds, dir_cls_preds=dir_cls_preds,
-                box_var_preds=box_var_preds
+                box_var_preds=box_var_preds,
+                cls_var_preds=cls_var_preds
             )
             data_dict['batch_cls_preds'] = batch_cls_preds
             data_dict['batch_box_preds'] = batch_box_preds
             if batch_box_var_preds is not None:
                 data_dict['batch_box_var_preds'] = batch_box_var_preds
+            if batch_cls_var_preds is not None:
+                data_dict['batch_cls_var_preds'] = batch_cls_var_preds
             data_dict['cls_preds_normalized'] = False
+
 
         return data_dict
