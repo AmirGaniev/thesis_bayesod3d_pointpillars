@@ -489,7 +489,6 @@ class AnchorHeadTemplate(nn.Module):
 
                 gaussian_posterior_means = torch.matmul(gaussian_posterior_covs,
                                                         intermediate_value).squeeze(-1)
-                print(gaussian_posterior_means.shape)
 
                 # done with posterior calculations
                 batch_box_preds = gaussian_posterior_means

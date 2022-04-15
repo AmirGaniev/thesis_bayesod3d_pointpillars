@@ -139,7 +139,7 @@ MODEL:
     
         BAYESOD_CONFIG:
                 use_gaussian_prior: False
-                use_dirichlet_prior: True
+                use_dirichlet_prior: False
                 gaussian_prior: {
                   type: isotropic,
                   isotropic_variance: 100000.0
