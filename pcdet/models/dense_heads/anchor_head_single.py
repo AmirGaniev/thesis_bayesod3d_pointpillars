@@ -10,7 +10,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
                  predict_boxes_when_training=True, **kwargs):
         super().__init__(
             model_cfg=model_cfg, num_class=num_class, class_names=class_names, grid_size=grid_size, point_cloud_range=point_cloud_range,
-            predict_boxes_when_training=True
+            predict_boxes_when_training=predict_boxes_when_training
         )
 
         self.num_anchors_per_location = sum(self.num_anchors_per_location)
@@ -94,12 +94,12 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         if self.model_cfg.VAR_OUTPUT_CLS:
             cls_var_preds = self.conv_cls_var(spatial_features_2d)
             cls_var_preds = cls_var_preds.permute(0, 2, 3, 1).contiguous()  # [N, H, W, C]
+            if self.logvar_max is not None:
+                cls_var_preds = torch.clamp(cls_var_preds, max=self.logvar_max)
             self.forward_ret_dict['cls_var_preds'] = cls_var_preds
         else:
             cls_var_preds = None
                 
-    
-
         if self.conv_dir_cls is not None:
             dir_cls_preds = self.conv_dir_cls(spatial_features_2d)
             dir_cls_preds = dir_cls_preds.permute(0, 2, 3, 1).contiguous()

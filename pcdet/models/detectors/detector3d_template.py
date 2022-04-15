@@ -188,7 +188,6 @@ class Detector3DTemplate(nn.Module):
                 roi_labels: (B, num_rois)  1 .. num_classes
                 batch_pred_labels: (B, num_boxes, 1)
         Returns:
-
         """
         post_process_cfg = self.model_cfg.POST_PROCESSING
         batch_size = batch_dict['batch_size']
@@ -217,7 +216,6 @@ class Detector3DTemplate(nn.Module):
 
                 # incroporate variances into the classification predictions
                 # monte carlo sampling
-
                 if self.model_cfg.DENSE_HEAD.VAR_OUTPUT_CLS is True:
                     cls_var_preds = batch_dict['batch_cls_var_preds'][batch_mask]
                     cls_distribution = torch.distributions.normal.Normal(
@@ -230,37 +228,62 @@ class Detector3DTemplate(nn.Module):
                     if not batch_dict['cls_preds_normalized']:
                         # final values
                         # cls_preds = torch.mean(torch.sigmoid(cls_sample), 0)
-
                         # softmax implementation generate posterior likelihood
                         cls_preds = torch.mean(torch.nn.functional.softmax(cls_sample, dim=2), 0)
-
-                        if self.model_cfg.DENSE_HEAD.BAYESOD_CONFIG.use_dirichlet_prior: 
-                            categorical_likelihood_distribution = torch.distributions.categorical.Categorical(
-                                probs=cls_preds
-                            )
-
-                            categorical_samples = torch.nn.functional.one_hot(
-                            categorical_likelihood_distribution.sample((100, )),
-                            num_classes=cls_preds.shape[1]
-                            )
-
-                            categorical_likelihood_samples = torch.sum(categorical_samples, dim=0)
-
-                            if self.model_cfg.DENSE_HEAD.BAYESOD_CONFIG.dirichlet_prior == "non_informative":
-                                dirich_prior_alphas = float(1.0 /  cls_preds.shape[1])
-                                dirichlet_posterior_count =   categorical_likelihood_samples + dirich_prior_alphas
-                            else:
-                                dirichlet_posterior_count = categorical_likelihood_samples
-                            cls_preds = dirichlet_posterior_count / torch.sum(dirichlet_posterior_count, dim=1, keepdim=True)
                 else:
                     if not batch_dict['cls_preds_normalized']:
-                        cls_preds = torch.sigmoid(cls_preds)
+                        #cls_preds = torch.sigmoid(cls_preds)
+                        cls_preds = torch.nn.functional.softmax(cls_preds, dim=1)
+
+                if self.model_cfg.DENSE_HEAD.BAYESOD_CONFIG.use_dirichlet_prior: 
+                    categorical_likelihood_distribution = torch.distributions.categorical.Categorical(
+                        probs=cls_preds
+                    )
+
+                    categorical_samples = torch.nn.functional.one_hot(
+                        categorical_likelihood_distribution.sample((100, )),
+                        num_classes=cls_preds.shape[1]
+                    )
+
+                    categorical_likelihood_samples = torch.sum(categorical_samples, dim=0)
+
+                    category_filter = torch.ne(
+                        torch.argmax(categorical_samples, dim=1),
+                        int(cls_preds.shape[1]-1)
+                    )
+
+                    categorical_likelihood_samples = torch.masked_select(
+                        categorical_samples,
+                        category_filter.unsqueeze(-1).repeat(1,cls_preds.shape[1])
+                    ).view(-1, cls_preds.shape[1])
+
+                    box_preds = torch.masked_select(
+                        box_preds,
+                        category_filter.unsqueeze(-1).repeat(1,box_preds.shape[1])
+                    ).view(-1, box_preds.shape[1])
+
+                    src_box_preds = box_preds
+
+                    if self.model_cfg.DENSE_HEAD.BAYESOD_CONFIG.dirichlet_prior == "non_informative":
+                        dirich_prior_alphas = float(1.0 /  cls_preds.shape[1])
+                        dirichlet_posterior_count =   categorical_likelihood_samples
+                    else:
+                        dirichlet_posterior_count = categorical_likelihood_samples
+                    
+                    cls_preds = dirichlet_posterior_count / torch.sum(dirichlet_posterior_count, dim=1, keepdim=True)
+
             else:
                 cls_preds = [x[batch_mask] for x in batch_dict['batch_cls_preds']]
                 src_cls_preds = cls_preds
                 if not batch_dict['cls_preds_normalized']:
                     cls_preds = [torch.sigmoid(x) for x in cls_preds]
-
+            
+            # get var preds
+            if batch_dict.get('batch_box_var_preds') is not None:
+                var_preds = batch_dict['batch_box_var_preds'][batch_mask]
+            else:
+                var_preds = None
+            
             if post_process_cfg.NMS_CONFIG.MULTI_CLASSES_NMS:
                 if not isinstance(cls_preds, list):
                     cls_preds = [cls_preds]
@@ -270,6 +293,7 @@ class Detector3DTemplate(nn.Module):
 
                 cur_start_idx = 0
                 pred_scores, pred_labels, pred_boxes = [], [], []
+
                 for cur_cls_preds, cur_label_mapping in zip(cls_preds, multihead_label_mapping):
                     assert cur_cls_preds.shape[1] == len(cur_label_mapping)
                     cur_box_preds = box_preds[cur_start_idx: cur_start_idx + cur_cls_preds.shape[0]]
@@ -297,9 +321,9 @@ class Detector3DTemplate(nn.Module):
                 selected, selected_scores = model_nms_utils.class_agnostic_nms(
                     box_scores=cls_preds, box_preds=box_preds,
                     nms_config=post_process_cfg.NMS_CONFIG,
-                    score_thresh=post_process_cfg.SCORE_THRESH
+                    score_thresh=0.98
                 )
-
+                
                 if post_process_cfg.OUTPUT_RAW_SCORE:
                     max_cls_preds, _ = torch.max(src_cls_preds, dim=-1)
                     selected_scores = max_cls_preds[selected]
@@ -307,19 +331,28 @@ class Detector3DTemplate(nn.Module):
                 final_scores = selected_scores
                 final_labels = label_preds[selected]
                 final_boxes = box_preds[selected]
+                if var_preds is not None:
+                    final_var_boxes = var_preds[selected]
 
             recall_dict = self.generate_recall_record(
                 box_preds=final_boxes if 'rois' not in batch_dict else src_box_preds,
                 recall_dict=recall_dict, batch_index=index, data_dict=batch_dict,
                 thresh_list=post_process_cfg.RECALL_THRESH_LIST
             )
-
-            record_dict = {
-                'pred_boxes': final_boxes,
-                'pred_scores': final_scores,
-                'pred_labels': final_labels
-            }
-            # print(record_dict)
+            if var_preds is not None:
+                record_dict = {
+                    'pred_boxes': final_boxes,
+                    'pred_scores': final_scores,
+                    'pred_labels': final_labels,
+                    'pred_var_boxes': final_var_boxes
+                }
+            else:
+                record_dict = {
+                    'pred_boxes': final_boxes,
+                    'pred_scores': final_scores,
+                    'pred_labels': final_labels
+                }
+                
             pred_dicts.append(record_dict)
 
         return pred_dicts, recall_dict

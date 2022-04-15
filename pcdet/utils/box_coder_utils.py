@@ -84,7 +84,7 @@ class ResidualCoder(object):
             rg_sin = sint + torch.sin(ra)
             rg = torch.atan2(rg_sin, rg_cos)
             if box_encodings_var is not None:
-                # THIS IS NOT RIGHT BUT POINTPILLARS DOES NOT ENGOCE ANGLE BY SIN OR COS
+                # THIS IS NOT RIGHT BUT POINTPILLARS DOES NOT ENCODE ANGLE BY SIN OR COS
                 vrg = vrt
         else:
             rg = rt + ra
